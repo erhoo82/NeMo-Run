@@ -40,10 +40,11 @@ def nsys_profile(start, end, ranks=[7]):
         ranks=ranks,
     )
 
-def get_llama3_tokenizer():
+def get_llama3_tokenizer(model):
+    name = "meta-llama/Llama-3.1-405B" if model == "405b" else f"meta-llama/Meta-Llama-3-{model.upper()}"
     tokenizer = run.Config(
         AutoTokenizer,
-        pretrained_model_name="meta-llama/Meta-Llama-3-8B",
+        pretrained_model_name=name,
         use_fast=True
         )
     return tokenizer
@@ -90,7 +91,7 @@ def run_pretraining(args):
     recipe.log.ckpt = None
     recipe.data.global_batch_size=args.gbs
     recipe.data.num_workers=2
-    recipe.data.tokenizer=get_llama3_tokenizer()
+    recipe.data.tokenizer=get_llama3_tokenizer(args.model)
     run_plugins = []
 
     recipe.trainer.plugins = bf16_with_fp8_mixed() if args.fp8 else bf16_mixed()
