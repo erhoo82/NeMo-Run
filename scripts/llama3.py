@@ -1,3 +1,4 @@
+import os
 import argparse
 from functools import partial
 
@@ -5,7 +6,7 @@ import nemo_run as run
 from nemo.collections import llm
 from nemo.collections.llm.recipes.log.default import wandb_logger
 from nemo.collections.llm.recipes.precision.mixed_precision import bf16_mixed, bf16_with_fp8_mixed
-from nemo.collections.llm.gpt.data.mock import MockDataModule
+from nemo.collections.common.tokenizers.huggingface import AutoTokenizer
 from nemo.lightning.run import plugins
 from nemo.lightning.pytorch.callbacks.garbage_collection import GarbageCollectionCallback
 
@@ -25,8 +26,7 @@ def get_args():
     parser.add_argument('--mbs', type=int, default=None)
     parser.add_argument('--fp32-grad', action='store_true')
     parser.add_argument('--gc', action='store_true', help="Do the automatic garbage collection")
-    parser.add_argument('--no-vboost', action='store_false', help="Disable vboost")
-    parser.add_argument('--mock-dataset', action='store_true')
+    parser.add_argument('--no-vboost', action='store_true', help="Disable vboost")
     parser.add_argument('--nsys', action='store_true')
     parser.add_argument('--wandb', action='store_true')
     parser.add_argument('--name-postfix', type=str, default="")
@@ -39,6 +39,14 @@ def nsys_profile(start, end, ranks=[7]):
         start_step=start,
         ranks=ranks,
     )
+
+def get_llama3_tokenizer():
+    tokenizer = run.Config(
+        AutoTokenizer,
+        pretrained_model_name="meta-llama/Meta-Llama-3-8B",
+        use_fast=True
+        )
+    return tokenizer
 
 def run_pretraining(args):
     name=f"llama3_{args.model}{args.name_postfix}"
@@ -58,35 +66,32 @@ def run_pretraining(args):
         ntasks_per_node=8,
         mem="0",
         exclusive=True,
+        #job_dir=os.path.join(job_dir, name),
     )
 
-    recipe = llm.llama3_8b.pretrain_recipe(
+    if args.model == '8b':
+        pretrain_recipe = llm.llama3_8b.pretrain_recipe
+    elif args.model == '70b':
+        pretrain_recipe = llm.llama3_70b.pretrain_recipe
+    elif args.model == '405b':
+        pretrain_recipe = llm.llama31_70b.pretrain_recipe
+    recipe = pretrain_recipe(
             dir="/checkpoints/llama3_7b",
             name=name,
             num_nodes=args.nodes,
             num_gpus_per_node=8,
+            performance_mode=True,
         )
     recipe.trainer.max_steps=100
     recipe.trainer.log_every_n_steps=1
     recipe.trainer.strategy.progress_interval=1
+    recipe.trainer.check_val_every_n_epoch = None
+    recipe.trainer.enable_checkpointing = False
+    recipe.log.ckpt = None
     recipe.data.global_batch_size=args.gbs
     recipe.data.num_workers=2
+    recipe.data.tokenizer=get_llama3_tokenizer()
     run_plugins = []
-
-    if args.mock_dataset:
-        recipe.data=run.Config(
-            MockDataModule,
-            tokenizer=recipe.data.tokenizer,
-            micro_batch_size=recipe.data.micro_batch_size,
-            global_batch_size=recipe.data.global_batch_size,
-            rampup_batch_size=recipe.data.rampup_batch_size,
-            num_train_samples=recipe.data.num_train_samples,
-            num_val_samples=recipe.data.num_val_samples,
-            num_test_samples=recipe.data.num_test_samples,
-            num_workers=recipe.data.num_workers,
-            persistent_workers=recipe.data.persistent_workers,
-            create_attention_mask=recipe.data.create_attention_mask,
-        )
 
     recipe.trainer.plugins = bf16_with_fp8_mixed() if args.fp8 else bf16_mixed()
     if not args.fp32_grad:
@@ -107,7 +112,7 @@ def run_pretraining(args):
             run.Config(GarbageCollectionCallback, 100, 100)
         )
 
-    run.run(recipe, executor=executor, plugins=run_plugins, detach=True)
+    run.run(recipe, executor=executor, plugins=run_plugins, detach=True, name=name)
 
 if __name__ == "__main__":
     run_pretraining(get_args())
